@@ -10,6 +10,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import javax.net.ssl.HttpsURLConnection;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.lang.reflect.Type;
 import java.net.MalformedURLException;
 import java.net.URL;
@@ -197,6 +198,64 @@ public class UserCache {
         members = new Gson().fromJson(reader, listType);
     }
 
+    void updateFronters(boolean blocking) {
+        if (blocking) {
+            try {
+                plugin.apiSemaphore.acquire();
+            } catch (InterruptedException e) {
+                plugin.getLogger().warning("Fronters update was interrupted!");
+                return;
+            }
+        } else {
+            boolean acquired = plugin.apiSemaphore.tryAcquire();
+            if (!acquired) {
+                return;
+            }
+        }
+        URL url = null;
+        try {
+            url = new URL("https://api.pluralkit.me/v2/systems/" + systemId + "/switches");
+        } catch (MalformedURLException e) {
+            return;
+        }
+        InputStreamReader reader;
+        OutputStreamWriter writer;
+        HttpsURLConnection conn = null;
+        try {
+            assert url != null;
+            conn = (HttpsURLConnection) url.openConnection();
+            if (token != null) {
+                conn.setRequestProperty("Authorization", token);
+            }
+            conn.setRequestMethod("POST");
+            conn.addRequestProperty("User-Agent", "PluralKitMC");
+            conn.addRequestProperty("Content-Type", "application/json");
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setDoOutput(true);
+
+            List<PluralKitMember> fronters = getFronters();
+            String frontersString = "";
+            for (PluralKitMember fronter : fronters) {
+                frontersString += "\"" + fronter.getUuid() + "\",";
+            }
+            String requestBody = "{\"members\": [" + frontersString + "]}";
+            writer = new OutputStreamWriter(conn.getOutputStream());
+            writer.write(requestBody, 0, requestBody.length());
+        } catch (IOException e) {
+            if (conn != null) {
+                InputStreamReader errorReader = new InputStreamReader(conn.getErrorStream());
+                PluralKitError pkError = new Gson().fromJson(errorReader, PluralKitError.class);
+                if (pkError.retryAfter != null) {
+                    // Hit a rate limit
+                    // Unfortunately, we can't really disable the semaphore
+                    plugin.getLogger().severe("Hit a rate limit while updating switch for " + systemId);
+                }
+            } else {
+                plugin.getLogger().warning("Failed to update switch for " + systemId);
+            }
+        }
+    }
+
     void updateIfNeeded(long updateFrequency, boolean blocking) {
         Date date = new Date();
         long now = date.getTime();
@@ -315,9 +374,7 @@ public class UserCache {
 
     public void setFronters(List<PluralKitMember> fronters) {
         this.fronters = fronters;
-        if (this.token != null) {
-            //TODO: Register switch with PluralKit API
-        }
+        updateFronters(false);
     }
 
     public PluralKitMember getFirstFronter() {
